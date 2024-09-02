@@ -1,0 +1,215 @@
+from cmu_graphics import *
+import cv2
+import numpy as np
+from PIL import Image
+import mediapipe as mp
+from hand_recognition2 import Net
+from hand_recognition2 import torch
+from torchvision import transforms
+
+
+class HandDetector:
+    def __init__(self) -> None:
+        self.hands = mp.solutions.hands.Hands(static_image_mode=False,
+                                              max_num_hands = 2,
+                                              min_detection_confidence = 0.5,
+                                              min_tracking_confidence = 0.5)
+    
+    def detect(self, image):
+        h, w = image.shape[:2]
+        imgRGB = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        landmarks = self.hands.process(imgRGB)
+
+        if landmarks.multi_hand_landmarks is None:
+            return np.array([])
+        
+        lms = np.array([[[lm.x*w, lm.y*h, lm.z] for lm in landmark.landmark] for landmark in landmarks.multi_hand_landmarks])
+        return lms.astype(int)
+    
+
+class HandFrame:
+    def __init__(self) -> None:
+        pass
+
+    def getPositions(self, landmarks):
+        maxX = -1
+        minX = 10000000
+        maxY = -1
+        minY = 10000000
+        for point in landmarks:
+            if point[0] < minX:
+                minX = point[0]
+            elif point[0] > maxX:
+                maxX = point[0]
+            if point[1] < minY:
+                minY = point[1]
+            elif point[1] > maxY:
+                maxY = point[1]
+        if landmarks[0][1] > maxY:
+            maxY = landmarks[0][1]
+        return (minX - 50, minY - 50, abs(minX - maxX) + 100, abs(minY - maxY) + 100)
+    
+    def drawHandFrame(self, positions):
+        drawRect(int(positions[0]), int(positions[1]), int(positions[2]), int(positions[3]), fill = None, border = 'blue')
+
+    
+        
+
+class GooglyEyes:
+    def __init__(self):
+        self.image = Image.open("googly_eye.png")
+    
+
+    def getPositions(self, landmarks):
+        leftCenterX = (landmarks[36][0] + landmarks[39][0])/2
+        leftCenterY = (landmarks[36][1] + landmarks[39][1])/2
+        rightCenterX = (landmarks[42][0] + landmarks[45][0])/2
+        rightCenterY = (landmarks[42][1] + landmarks[45][1])/2
+        leftEyeWidth = abs(landmarks[36][0] - landmarks[39][0])
+        leftEyeHeight = abs(landmarks[36][1] - landmarks[39][1])
+        rightEyeWidth = abs(landmarks[42][0] - landmarks[45][0])
+        rightEyeHeight = abs(landmarks[42][1] - landmarks[45][1])
+
+        leftEyeScale = max(leftEyeWidth, leftEyeHeight)
+        rightEyeScale = max(rightEyeWidth, rightEyeWidth)
+
+        return [(leftCenterX, leftCenterY), (rightCenterX, rightCenterY), (leftEyeScale, leftEyeScale), (rightEyeScale, rightEyeScale)]
+
+    def drawEyes(self, positions):
+        leftEye = self.image.resize(positions[2])
+        rightEye = self.image.resize(positions[3])
+        leftEye = CMUImage(leftEye)
+        rightEye = CMUImage(rightEye)
+        drawImage(leftEye, int(positions[0][0]), int(positions[0][1]), align = 'center')
+        drawImage(rightEye, int(positions[1][0]), int(positions[1][1]), align = 'center')
+
+class ShockedGooglyEyes(GooglyEyes):
+    def __init__(self):
+        super().__init__()
+        self.image = Image.open("RedGooglyEye.png")
+
+
+
+class FaceDetector:
+    def __init__(self):
+        self.face_detector = cv2.CascadeClassifier()
+        self.face_detector.load("haarcascade_frontalface_alt2.xml")
+        LBFmodel_name = "lbf_face_landmarks.yaml"
+        self.landmark_detector = cv2.face.createFacemarkLBF()
+        self.landmark_detector.loadModel(LBFmodel_name)
+
+    def detect(self, image):
+        detections = self.face_detector.detectMultiScale(image)
+        if len(detections) == 0:
+            return []
+        _, landmarks = self.landmark_detector.fit(image, detections)
+        return np.concatenate(landmarks, axis = 0).astype(np.int64)
+
+
+
+def open_stream(app):
+    app.video = cv2.VideoCapture(0)
+    if not app.video.isOpened():
+        app.quit()
+
+def update_image(app):
+    success, image = app.video.read()
+    if not success:
+        app.quit()
+    app.img = image[:, ::-1, ::-1]
+
+def onAppStart(app):
+    open_stream(app)
+    update_image(app)
+    set_app_window(app)
+    app.stepsPerSecond = 100
+    app.faces = None
+    app.hands = []
+    app.detector = FaceDetector()
+    app.handDetector = HandDetector()
+    app.transformer = transforms.Compose([
+                                    transforms.Grayscale(),
+                                    transforms.Resize((128, 128)),
+                                    transforms.RandomHorizontalFlip(),
+                                    transforms.ToTensor()
+                                ])
+
+    app.hand_patch = []
+    app.gesture_recognizer = Net(4)
+    app.gesture_recognizer.load_state_dict(torch.load('bn_hand_gesture_model_50.pt'))
+    app.gesture_recognizer.eval()
+    app.sign = None
+
+def isShocked(app, detections):
+    if abs(detections[66][1] - detections[62][1]) >= 10:
+        return True
+    return False
+
+
+
+def set_app_window(app):
+    app.width = int(app.video.get(cv2.CAP_PROP_FRAME_WIDTH))
+    app.height = int(app.video.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+def redrawAll(app):
+    pil_img = Image.fromarray(app.img)
+    image = CMUImage(pil_img)
+    drawImage(image,0, 0)
+    if app.sign is not None:
+        if app.sign == 1:
+            drawLabel('Paper', app.width/2, 100, size = 50)
+        if app.sign == 2:
+            drawLabel('Rock', app.width/2, 100, size = 50)
+        if app.sign == 3:
+            drawLabel('Scissors', app.width/2, 100, size = 50)
+    if app.faces is not None:
+        for face in app.faces:
+            for point in face:
+                drawCircle(int(point[0]), int(point[1]), 5, fill = 'red')
+            if isShocked(app, face):
+                googl = ShockedGooglyEyes()
+            else:
+                googl = GooglyEyes()
+            eyePositions = googl.getPositions(face)
+            googl.drawEyes(eyePositions)
+
+    if app.hands is not None:
+        for hand in app.hands:
+            hnd = HandFrame()
+            positions = hnd.getPositions(hand)
+            hnd.drawHandFrame(positions)
+            app.hand_patch.append(positions)
+            for point in hand:
+                drawCircle(int(point[0]), int(point[1]), 5, fill = 'blue')
+
+
+def onKeyPress(app, key):
+    if key == 'q':
+        app.quit()
+
+def onMousePress(app, mouseX, mouseY):
+    pass
+
+def onStep(app):
+
+    update_image(app)
+    app.faces = (app.detector.detect(cv2.cvtColor(app.img, cv2.COLOR_RGB2GRAY)))
+    app.hands = (app.handDetector.detect(app.img))
+    for patch in app.hand_patch:
+        pil_img = Image.fromarray(app.img)
+        croppedImage = pil_img.crop((patch[0], patch[1], patch[2] + patch[0], patch[3] + patch[1]))
+        output = app.gesture_recognizer(app.transformer(croppedImage).unsqueeze(0))[0]
+        index = None
+        max = -1000
+        for i in range(len(output)):
+            if output[i] > max:
+                max = output[i]
+                index = i
+        app.sign = index
+    
+
+
+
+def main():
+    runApp()
+main()
